@@ -1,0 +1,298 @@
+### ANZ-InsideSherpa Task 2: Predictive analytics
+### Done By: Megan Ng 
+##  ==============================================================
+
+
+Data Wrangling using dplyr and Data Cleaning
+---------------------------------------------------
+
+##  Load library 
+```{r}
+r = getOption("repos")
+r["CRAN"] = "http://cran.us.r-project.org"
+options(repos = r)
+install.packages('tidyverse')
+install.packages("dplyr") #tidyverse
+library(dplyr)
+library(tidyr)
+setwd("C:\\Users\\admin\\Desktop\\InsideSherpa (ANZ)\\Task 2\\data")
+```
+
+##  Load Data
+```{r}
+data<-read.csv("ANZ synthesised transaction dataset.csv", sep= ';', header = TRUE) #note sep is ';'
+#head(data)
+#attach(data)
+str(data) # gender already in factor , age is integer
+```
+
+## Data preparation
+```{r}
+#Location data
+data_cust_id<-data%>%select(customer_id) #library MASS and car will mask dplyr use without 
+data_location<-data%>%separate(col=long_lat,c('longitude', 'latitude'),sep =" ") %>%
+  select(longitude,latitude)%>%mutate(latitude= substr(data$long_lat, 9,13))
+data_location_numeric<-data.frame<-sapply(data_location,as.numeric)                   
+data_id_location<-cbind(data_cust_id,data_location_numeric)
+data_location_unique<-data_id_location%>%unique()
+#write.csv(data_id_location, "data_location.csv")
+#nrow(data_location_unique)                           
+```
+
+
+```{r}
+## testing out data to see how many/frequency of pay/salary records per customer since possible to vary 
+data_salary<-data%>% filter(txn_description == "PAY/SALARY") # we r interested only in salary not POS etc
+#head(data_salary)
+cust_1_data<-data_salary %>% filter(customer_id == "CUS-1462656821") # this cust id only has 7 salary records for over 3 mths
+cust_1_data
+
+cust_2_data<-data_salary %>% filter(customer_id=="CUS-2500783281") # 14 salary records over 3 mths
+cust_2_data
+
+# here we conclude to find annual salary of each customer, we have to find their respective average salary over 3mths x 12 = annual salary
+
+unique_id<-unique(data_salary$customer_id)
+df_unique_id<-data.frame(customer_id= unique_id)
+#df_unique_id
+
+data_sales<-data %>% filter(txn_description== 'SALES-POS' | txn_description== 'POS')
+
+
+## records only span across 3 mths august,sep,oct , so annual salary = sum(amount)/3 *12
+
+data_annual_salary<-data_salary %>% group_by(customer_id) %>% summarise(annual_salary = (sum(amount)/3) *12)
+
+## this gives attributes of spending patterns /habits of customers 
+data_var<-data_sales%>% select(customer_id,age,gender,amount,balance)%>%group_by(customer_id)%>%
+  mutate(monthly_transaction_volume=n()/3,monthly_transaction_amt=sum(amount)/3,median_balance=median(balance,na.rm=T))%>%
+  select(-c("amount","balance"))%>%unique()
+final_data<-data_var%>%merge(data_annual_salary)%>%merge(data_location_unique)
+
+final_data$age_group<- ifelse( final_data[,"age"]>=18 & final_data[,"age"]<=30, "young adults",
+                               ifelse(final_data[,"age"]>=31 & final_data[,"age"]<=50,"middle-aged adults","older adults"))
+head(final_data)
+str(final_data) # check all data types are correct before performing regression analysis need to change
+
+final_data$age_group =as.factor(final_data$age_group) # age group need to change to factors later 
+```
+
+
+
+
+  Data exploration
+=============================================================
+
+
+## scatterplot matrix 
+```{r}
+panel.cor <- function(x, y, digits=2, prefix="", cex.cor, ...)
+{
+  usr <- par("usr"); on.exit(par(usr))
+  par(usr = c(0, 1, 0, 1))
+  r <- abs(cor(x, y))
+  txt <- format(c(r, 0.123456789), digits=digits)[1]
+  txt <- paste(prefix, txt, sep="")
+  if(missing(cex.cor)) cex.cor <- 0.8/strwidth(txt)
+  text(0.5, 0.5, txt, cex = cex.cor * r)
+}
+
+
+pairs(annual_salary~age+gender+monthly_transaction_volume+monthly_transaction_amt+median_balance+longitude+latitude+age_group, data=final_data,
+      lower.panel=panel.cor, upper.panel=panel.smooth, 
+      pch=20, main=" Scatterplot Matrix")
+
+#x<-cbind(annual_salary,age,gender,monthly_transaction_volume,monthly_transaction_amt,median_balance,longitude,latitude,age_group)
+
+#cor(x)
+```
+
+
+
+##  ===================================
+##  (A) Model Building
+##  ===================================      
+
+```{r}
+
+##model 1
+model_1<-lm(annual_salary~.-customer_id,data=final_data)
+summary(model_1)
+anova(model_1)
+```
+The first model included all variables. From the summary table, we can see all variables are insignificant at 5% significance level except the intercept term, age and age group,suggesting too many redundant variables.
+Also F-statistic is 1.636 with p-value >0.05 hence this model is insignificant at 5% significance level. As such, next we will perform stepwise regression to choose the model with the lowest AIC. 
+
+```{r}
+#model_step<-MASS::stepAIC(model_1)summary(model_2)
+step_model_1<-step(model_1,direction=c("both"))
+summary(step_model_1)
+anova(step_model_1)
+```
+step_model_1 has F-statistic: 2.297 on 6 and 93 DF,  p-value: 0.04113<0.05 hence this model is significant,
+compared to model_1 most variables are significant too. However, both R^2 and adjusted R^2 is still too low.
+The residual vs fitted plot of step_model_1 appears pretty stable however I would like to perform a box cox transformation to examine if any profound improvement can be seen in the stability of variance.
+
+
+## Box cox transformation 
+## ------------------------------
+
+```{r}
+MASS::boxcox(step_model_1, lambda=seq(-4, 4, by=0.5),optimize=TRUE,plotit = TRUE) #lambda =0 
+```
+Box cox suggest lambda to be 0 hence a log transformation will be perform on y (y-> log(y)).
+
+
+```{r}
+model_2<-lm(log(annual_salary)~age+median_balance+longitude+latitude+age_group,data=final_data)
+summary(model_2)
+
+step_model_2<-step(model_2,direction=c("both")) # model_2 and step_model_2 both propose same 
+summary(step_model_2)
+
+## conclusion model_2 best model 
+```
+step_model_2 appear to be a better model than step_model_1 as its R^2 has improved. However both model's R^2 are still too low to explain the variability in response y. 
+
+##  =================================            
+##  (B) Model Assessment
+##  =================================
+
+## Check for constant/stable variance 
+```{r}
+plot(step_model_1$fitted.values,rstandard(step_model_1), xlab="fitted", ylab= "Standardized Residuals", main = " Step Model 1",pch=20)
+abline(h=0)
+
+#plot(model_2$fitted.values,rstandard(model_2), xlab="fitted", ylab= "Standardized Residuals", main = " Model 2",pch=20)
+#abline(h=0)
+
+#step_model_2 same model as model 2
+plot(step_model_2$fitted.values,rstandard(step_model_2), xlab="fitted", ylab= "Standardized Residuals", main = " Step Model 2",pch=20)
+abline(h=0)
+```
+
+
+
+From the residual against fitted values plot both model has relative stable variance with majority of points lying between -2 and 2.
+
+## Check that normality assumption not violated
+```{r}
+#Normal probability plot =  QQ plot
+qqnorm(rstandard(step_model_1),datax = TRUE, ylab = "Standardized Residuals", xlab = "Z scores", main = "Normal Probability Plot Step Model 1",pch=20)
+qqline(rstandard(step_model_1),datax = TRUE)
+
+qqnorm(rstandard(step_model_2),datax = TRUE, ylab = "Standardized Residuals", xlab = "Z scores", main = "Normal Probability Plot Step Model 2",pch=20)
+qqline(rstandard(step_model_2),datax = TRUE)
+
+```
+
+
+
+The normal probability plot of residuals indicates no deviation from normality assumption as points lie
+relatively close to straight line.
+
+## Ensure no mulit-collinearity VIF<10
+
+```{r}
+car:: vif(step_model_1) # VIF <10 
+
+car::vif(step_model_2)
+```
+By looking at variance inflation factors, there does not seem to be any indication of strong multicollinearity in both models, since no variables show VIF values > 10.
+
+
+
+
+
+
+
+##  (c) Prediction Errors (= Residual Standard Error / mean) --> coefficient of variation
+##  ---------------------------------------------------------------------------------------
+```{r}
+predictionError_stepmodel_1 <- sigma(step_model_1)/mean(final_data$annual_salary)
+predictionError_stepmodel_1     #0.3871727
+# note: here, RSE = sigma(model_1)
+
+predictionError_stepmodel_2 <- sigma(step_model_2)/mean(final_data$annual_salary)
+predictionError_stepmodel_2          #5.477038e-06  
+```
+## Step Model 2 is better (as it has lower error rate)
+## The lower the better --> model 2 better.
+
+
+
+## Alternatively if you wish to use mse (mean square error)
+##  --------------------------------------------------------
+
+## In this case, if we are to use mse, we will select step model 2 as it 
+## provides a lower error rate.
+
+
+## RMSE
+```{r}
+RMSE <- function(error) { sqrt(mean(error^2)) }  ## Function for Root Mean Squared Error
+RMSE(step_model_1$residuals) #25039.73
+RMSE(step_model_2$residuals)  #0.354218
+```
+
+Train-Test Split
+=========================================
+
+## 1. create training and testing set
+## ====================================================
+```{r}
+nrow(final_data) #100  80% train 20% test
+
+set.seed(1234) # set seed for reproducibility
+index <- sample(100, 80)
+
+train_final_data <- final_data[index,]
+test_final_data <- final_data[-index,]
+#View(train_final_data)
+#View(test_final_data)
+```
+
+
+
+
+##  2.train our model using training data
+## ==============================================
+```{r}
+trained_model <- lm(annual_salary~age+median_balance+longitude+latitude+age_group,data=train_final_data)
+```
+
+# 3.  run the trained model on testing data
+##  ============================================
+```{r}
+pred.test <- predict(trained_model, newdata = test_final_data)
+
+length(pred.test)
+
+head(pred.test)
+```
+
+##4. display result in an additional column in a dataframe
+## ===========================================================
+```{r}
+result_test <- data.frame(
+  actual_annual_salary = test_final_data$annual_salary,
+  predicted_annual_salary = pred.test
+)
+
+mse_function <- function (x) {
+  mean((as.numeric(x[1]) - as.numeric(x[2]))^2)
+}
+
+
+result_test$mse_column <- apply(result_test[,c("actual_annual_salary", "predicted_annual_salary")], 1, mse_function)
+View(result_test)
+
+
+mse <- mean(result_test$mse_column)
+mse   
+```
+
+
+Conclusion
+==============================
+In conclusion the RMSE of the model is too high suggesting high error rate of the model and largely inaccurate to use for predicting annual salary. Furthermore R^2 and adjusted R^2 are significantly low and explains only 13% of the variability of response y (annual salary). Hence, we would require more data to built a better model.
